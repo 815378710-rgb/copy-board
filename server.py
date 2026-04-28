@@ -15,27 +15,48 @@ import json
 import os
 import uuid
 import hashlib
+import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
 # ========== 配置 ==========
-PORT = 8899
-ADMIN_PASSWORD = "admin123"   # 修改这里设置你的管理员密码
+PORT = int(os.environ.get("PORT", "8899"))
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "items.json")
+MAX_BODY_SIZE = 1024 * 1024  # 1MB
 # ==========================
+
+# File I/O lock for thread safety
+_data_lock = threading.Lock()
 
 
 def read_data():
     if not os.path.exists(DATA_FILE):
         return []
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"[WARN] Data file corrupted: {e}, returning empty list")
+        # Backup corrupted file
+        backup_file = DATA_FILE + ".corrupted." + datetime.now().strftime("%Y%m%d%H%M%S")
+        try:
+            os.rename(DATA_FILE, backup_file)
+            print(f"[INFO] Corrupted file backed up to: {backup_file}")
+        except Exception:
+            pass
+        return []
 
 
 def write_data(items):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+    # Atomic write: write to temp file then rename
+    temp_file = DATA_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+    os.replace(temp_file, DATA_FILE)
 
 
 def get_next_id(items):
@@ -911,8 +932,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY_SIZE:
+            raise ValueError(f"Request body too large: {length} bytes")
         if length:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            try:
+                return json.loads(self.rfile.read(length).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                raise ValueError(f"Invalid JSON: {e}")
         return {}
 
     def do_OPTIONS(self):
@@ -931,10 +957,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/admin":
             self.send_html(ADMIN_HTML)
         elif path == "/api/items":
-            items = read_data()
+            with _data_lock:
+                items = read_data()
             self.send_json(200, items)
         elif path == "/api/random":
-            items = read_data()
+            with _data_lock:
+                items = read_data()
             total = len(items)
             if not items:
                 self.send_json(200, {"item": None, "total": 0})
@@ -957,116 +985,144 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        parts = path.strip("/").split("/")
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path.rstrip("/")
+            parts = path.strip("/").split("/")
 
-        if path == "/api/login":
-            body = self.read_body()
-            pwd = body.get("password", "")
-            if pwd == ADMIN_PASSWORD:
-                token = make_token(pwd)
-                VALID_TOKENS.add(token)
-                self.send_json(200, {"ok": True, "token": token})
+            if path == "/api/login":
+                body = self.read_body()
+                pwd = body.get("password", "")
+                if pwd == ADMIN_PASSWORD:
+                    token = make_token(pwd)
+                    VALID_TOKENS.add(token)
+                    self.send_json(200, {"ok": True, "token": token})
+                else:
+                    self.send_json(401, {"ok": False, "error": "密码错误"})
+
+            elif path == "/api/items":
+                if not self.check_token():
+                    self.send_json(403, {"ok": False, "error": "请先登录"})
+                    return
+                body = self.read_body()
+                title = body.get("title", "").strip()
+                content = body.get("content", "").strip()
+                if not title or not content:
+                    self.send_json(400, {"ok": False, "error": "标题和内容不能为空"})
+                    return
+                if len(title) > 200:
+                    self.send_json(400, {"ok": False, "error": "标题不能超过200字"})
+                    return
+                if len(content) > 5000:
+                    self.send_json(400, {"ok": False, "error": "内容不能超过5000字"})
+                    return
+                with _data_lock:
+                    items = read_data()
+                    new_item = {
+                        "id": get_next_id(items),
+                        "title": title,
+                        "content": content,
+                        "created_at": datetime.now().isoformat(timespec="seconds")
+                    }
+                    items.append(new_item)
+                    write_data(items)
+                self.send_json(200, {"ok": True, "item": new_item})
+
+            elif len(parts) == 3 and parts[0] == "api" and parts[1] == "use":
+                # /api/use/<id> — 用户已复制，销毁该条目（无需管理员token）
+                try:
+                    item_id = int(parts[2])
+                except ValueError:
+                    self.send_json(400, {"ok": False, "error": "无效ID"})
+                    return
+                with _data_lock:
+                    items = read_data()
+                    new_items = [i for i in items if i["id"] != item_id]
+                    if len(new_items) == len(items):
+                        self.send_json(404, {"ok": False, "error": "条目不存在"})
+                        return
+                    write_data(new_items)
+                self.send_json(200, {"ok": True, "remaining": len(new_items)})
+
             else:
-                self.send_json(401, {"ok": False, "error": "密码错误"})
-
-        elif path == "/api/items":
-            if not self.check_token():
-                self.send_json(403, {"ok": False, "error": "请先登录"})
-                return
-            body = self.read_body()
-            title = body.get("title", "").strip()
-            content = body.get("content", "").strip()
-            if not title or not content:
-                self.send_json(400, {"ok": False, "error": "标题和内容不能为空"})
-                return
-            items = read_data()
-            new_item = {
-                "id": get_next_id(items),
-                "title": title,
-                "content": content,
-                "created_at": datetime.now().isoformat(timespec="seconds")
-            }
-            items.append(new_item)
-            write_data(items)
-            self.send_json(200, {"ok": True, "item": new_item})
-
-        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "use":
-            # /api/use/<id> — 用户已复制，销毁该条目（无需管理员token）
-            try:
-                item_id = int(parts[2])
-            except ValueError:
-                self.send_json(400, {"ok": False, "error": "无效ID"})
-                return
-            items = read_data()
-            new_items = [i for i in items if i["id"] != item_id]
-            write_data(new_items)
-            self.send_json(200, {"ok": True, "remaining": len(new_items)})
-
-        else:
-            self.send_response(404)
-            self.end_headers()
+                self.send_response(404)
+                self.end_headers()
+        except ValueError as e:
+            self.send_json(400, {"ok": False, "error": str(e)})
 
     def do_PUT(self):
-        parsed = urlparse(self.path)
-        parts = parsed.path.strip("/").split("/")
-        # /api/items/<id>
-        if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
-            if not self.check_token():
-                self.send_json(403, {"ok": False, "error": "请先登录"})
-                return
-            try:
-                item_id = int(parts[2])
-            except ValueError:
-                self.send_json(400, {"ok": False, "error": "无效ID"})
-                return
-            body = self.read_body()
-            title = body.get("title", "").strip()
-            content = body.get("content", "").strip()
-            if not title or not content:
-                self.send_json(400, {"ok": False, "error": "标题和内容不能为空"})
-                return
-            items = read_data()
-            found = False
-            for item in items:
-                if item["id"] == item_id:
-                    item["title"] = title
-                    item["content"] = content
-                    item["updated_at"] = datetime.now().isoformat(timespec="seconds")
-                    found = True
-                    break
-            if not found:
-                self.send_json(404, {"ok": False, "error": "条目不存在"})
-                return
-            write_data(items)
-            self.send_json(200, {"ok": True})
-        else:
-            self.send_response(404)
-            self.end_headers()
+        try:
+            parsed = urlparse(self.path)
+            parts = parsed.path.strip("/").split("/")
+            # /api/items/<id>
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
+                if not self.check_token():
+                    self.send_json(403, {"ok": False, "error": "请先登录"})
+                    return
+                try:
+                    item_id = int(parts[2])
+                except ValueError:
+                    self.send_json(400, {"ok": False, "error": "无效ID"})
+                    return
+                body = self.read_body()
+                title = body.get("title", "").strip()
+                content = body.get("content", "").strip()
+                if not title or not content:
+                    self.send_json(400, {"ok": False, "error": "标题和内容不能为空"})
+                    return
+                if len(title) > 200:
+                    self.send_json(400, {"ok": False, "error": "标题不能超过200字"})
+                    return
+                if len(content) > 5000:
+                    self.send_json(400, {"ok": False, "error": "内容不能超过5000字"})
+                    return
+                with _data_lock:
+                    items = read_data()
+                    found = False
+                    for item in items:
+                        if item["id"] == item_id:
+                            item["title"] = title
+                            item["content"] = content
+                            item["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                            found = True
+                            break
+                    if not found:
+                        self.send_json(404, {"ok": False, "error": "条目不存在"})
+                        return
+                    write_data(items)
+                self.send_json(200, {"ok": True})
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except ValueError as e:
+            self.send_json(400, {"ok": False, "error": str(e)})
 
     def do_DELETE(self):
-        parsed = urlparse(self.path)
-        parts = parsed.path.strip("/").split("/")
-        if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
-            if not self.check_token():
-                self.send_json(403, {"ok": False, "error": "请先登录"})
-                return
-            try:
-                item_id = int(parts[2])
-            except ValueError:
-                self.send_json(400, {"ok": False, "error": "无效ID"})
-                return
-            items = read_data()
-            new_items = [i for i in items if i["id"] != item_id]
-            if len(new_items) == len(items):
-                self.send_json(404, {"ok": False, "error": "条目不存在"})
-                return
-            write_data(new_items)
-            self.send_json(200, {"ok": True})
-        else:
-            self.send_response(404)
-            self.end_headers()
+        try:
+            parsed = urlparse(self.path)
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
+                if not self.check_token():
+                    self.send_json(403, {"ok": False, "error": "请先登录"})
+                    return
+                try:
+                    item_id = int(parts[2])
+                except ValueError:
+                    self.send_json(400, {"ok": False, "error": "无效ID"})
+                    return
+                with _data_lock:
+                    items = read_data()
+                    new_items = [i for i in items if i["id"] != item_id]
+                    if len(new_items) == len(items):
+                        self.send_json(404, {"ok": False, "error": "条目不存在"})
+                        return
+                    write_data(new_items)
+                self.send_json(200, {"ok": True})
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except ValueError as e:
+            self.send_json(400, {"ok": False, "error": str(e)})
 
 
 if __name__ == "__main__":
