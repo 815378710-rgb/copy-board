@@ -411,7 +411,7 @@ async function loadRandom(excludeId) {
   mainEl.innerHTML = '<div class="empty"><div class="empty-icon">🌸</div>加载中...</div>';
 
   try {
-    const url = excludeId != null ? '/api/random?exclude=' + excludeId : '/api/random';
+    const url = excludeId != null ? '/zhongcao/api/random?exclude=' + excludeId : '/zhongcao/api/random';
     const res = await fetch(url);
     const data = await res.json();
     setCount(data.total != null ? data.total : null);
@@ -509,7 +509,7 @@ async function doCopyContent() {
     await copyText(fullContent);
     // 通知后端销毁
     const id = currentItem.id;
-    fetch('/api/use/' + id, { method: 'POST' }).catch(()=>{});
+    fetch('/zhongcao/api/use/' + id, { method: 'POST' }).catch(()=>{});
     step = 2;
     showDone();
     showToast('可以去小红书粘贴正文啦，一定要记得在下方添加店铺位置！（搜：白月清川国风妆造工作室）', 3200);
@@ -703,7 +703,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 <div id="main">
   <div class="header">
     <h1>🌸 素材管理</h1>
-    <a href="/">查看前端 →</a>
+    <a href="/zhongcao/">查看前端 →</a>
   </div>
 
   <!-- 新增表单 -->
@@ -755,7 +755,7 @@ let token = sessionStorage.getItem('admin_token') || '';
 async function doLogin() {
   const pwd = document.getElementById('pwdInput').value.trim();
   if (!pwd) { document.getElementById('loginErr').textContent = '请输入密码'; return; }
-  const res = await fetch('/api/login', {
+  const res = await fetch('/zhongcao/api/login', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({password: pwd})
@@ -778,11 +778,11 @@ function showMain() {
 
 // 如果已有token，直接尝试加载
 if (token) {
-  fetch('/api/items').then(r => r.ok ? showMain() : null);
+  fetch('/zhongcao/api/items').then(r => r.ok ? showMain() : null);
 }
 
 async function loadItems() {
-  const res = await fetch('/api/items');
+  const res = await fetch('/zhongcao/api/items');
   const items = await res.json();
   document.getElementById('listCount').textContent = `共 ${items.length} 条文案`;
   const el = document.getElementById('itemListEl');
@@ -805,7 +805,7 @@ async function addItem() {
   document.getElementById('addErr').textContent = '';
   if (!title) { document.getElementById('addErr').textContent = '请填写标题'; return; }
   if (!content) { document.getElementById('addErr').textContent = '请填写内容'; return; }
-  const res = await fetch('/api/items', {
+  const res = await fetch('/zhongcao/api/items', {
     method: 'POST',
     headers: {'Content-Type':'application/json','X-Token':token},
     body: JSON.stringify({title, content})
@@ -822,7 +822,7 @@ async function addItem() {
 
 let currentItems = [];
 async function openEdit(id) {
-  const res = await fetch('/api/items');
+  const res = await fetch('/zhongcao/api/items');
   const items = await res.json();
   const item = items.find(i => i.id === id);
   if (!item) return;
@@ -844,7 +844,7 @@ async function saveEdit() {
   document.getElementById('editErr').textContent = '';
   if (!title) { document.getElementById('editErr').textContent = '标题不能为空'; return; }
   if (!content) { document.getElementById('editErr').textContent = '内容不能为空'; return; }
-  const res = await fetch('/api/items/' + id, {
+  const res = await fetch('/zhongcao/api/items/' + id, {
     method: 'PUT',
     headers: {'Content-Type':'application/json','X-Token':token},
     body: JSON.stringify({title, content})
@@ -856,7 +856,7 @@ async function saveEdit() {
 
 async function deleteItem(id) {
   if (!confirm('确认删除这条文案？')) return;
-  const res = await fetch('/api/items/' + id, {
+  const res = await fetch('/zhongcao/api/items/' + id, {
     method: 'DELETE',
     headers: {'X-Token': token}
   });
