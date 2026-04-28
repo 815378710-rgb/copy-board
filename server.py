@@ -698,7 +698,48 @@ ADMIN_HTML = """<!DOCTYPE html>
   .modal-actions { display: flex; gap: 10px; margin-top: 14px; }
 
   .err { color: #ff6b9d; font-size: 13px; margin-top: 8px; }
+
+  /* 批量导入 */
+  .import-section {
+    background: linear-gradient(135deg, #fff0f8 0%, #ffe8f3 100%);
+    margin: 12px 12px 8px; border-radius: 20px; padding: 18px 16px;
+    box-shadow: 0 4px 16px rgba(255,107,157,0.10);
+    border: 2px dashed #ffd6e7;
+  }
+  .import-section h3 { font-size: 15px; font-weight: 700; margin-bottom: 12px; color: #d94f7e; }
+  .import-section .file-input-wrap {
+    position: relative; overflow: hidden; display: inline-block; width: 100%;
+  }
+  .import-section input[type="file"] {
+    position: absolute; left: 0; top: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer;
+  }
+  .import-section .file-btn {
+    display: block; width: 100%; padding: 14px;
+    background: #fff; border: 2px dashed #ffb3ce; border-radius: 14px;
+    text-align: center; color: #d94f7e; font-size: 14px; font-weight: 500;
+    transition: all 0.2s; cursor: pointer;
+  }
+  .import-section .file-btn:hover { background: #fff5f9; border-color: #ff6b9d; }
+  .import-section .file-name { font-size: 12px; color: #b06080; margin-top: 8px; text-align: center; }
+  .import-progress { margin-top: 12px; }
+  .import-progress-bar {
+    height: 8px; background: #ffe8f0; border-radius: 4px; overflow: hidden;
+  }
+  .import-progress-bar-inner {
+    height: 100%; background: linear-gradient(90deg, #ff6b9d, #ff9ebf);
+    width: 0%; transition: width 0.3s ease; border-radius: 4px;
+  }
+  .import-progress-text { font-size: 12px; color: #b06080; margin-top: 6px; text-align: center; }
+  .import-result { margin-top: 10px; font-size: 13px; line-height: 1.7; }
+  .import-result .ok { color: #52c98b; }
+  .import-result .fail { color: #ff6b6b; }
+  .import-hint {
+    font-size: 12px; color: #c080a0; margin-top: 10px;
+    background: rgba(255,255,255,0.6); padding: 10px 12px; border-radius: 10px;
+  }
+  .import-hint code { background: #ffe8f0; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 </style>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 </head>
 <body>
 
@@ -740,6 +781,29 @@ ADMIN_HTML = """<!DOCTYPE html>
     </div>
     <p class="err" id="addErr"></p>
     <button class="btn" onclick="addItem()">🌷 保存发布</button>
+  </div>
+
+  <!-- 批量导入 -->
+  <div class="import-section">
+    <h3>📥 批量导入素材（Excel）</h3>
+    <div class="file-input-wrap">
+      <div class="file-btn" id="fileBtn">点击选择 .xlsx 文件</div>
+      <input type="file" id="importFile" accept=".xlsx,.xls" onchange="onFileSelected(this)">
+    </div>
+    <p class="file-name" id="fileName"></p>
+    <button class="btn" id="btnImport" onclick="doBatchImport()" style="margin-top:10px;display:none;">📥 开始导入</button>
+    <div class="import-progress" id="importProgress" style="display:none;">
+      <div class="import-progress-bar"><div class="import-progress-bar-inner" id="progressBar"></div></div>
+      <p class="import-progress-text" id="progressText">准备导入...</p>
+    </div>
+    <div class="import-result" id="importResult"></div>
+    <div class="import-hint">
+      💡 Excel 格式要求：<br>
+      • 第 1 列：<code>序号</code>（不导入，仅参考）<br>
+      • 第 2 列：<code>标题</code>（必填）<br>
+      • 第 3 列：<code>正文</code>（必填）<br>
+      • 从第 2 行开始读取（第 1 行为表头）
+    </div>
   </div>
 
   <!-- 列表 -->
@@ -884,6 +948,122 @@ async function deleteItem(id) {
   const data = await res.json();
   if (data.ok) loadItems();
   else alert(data.error || '删除失败');
+}
+
+/* ---- 批量导入 ---- */
+let pendingRows = [];
+
+function onFileSelected(input) {
+  const file = input.files[0];
+  if (!file) return;
+  document.getElementById('fileName').textContent = '已选择: ' + file.name;
+  document.getElementById('btnImport').style.display = 'block';
+  document.getElementById('importResult').innerHTML = '';
+  document.getElementById('importProgress').style.display = 'none';
+  pendingRows = [];
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, { type: 'array' });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+
+      // 跳过表头（第1行），从第2行开始
+      pendingRows = [];
+      for (let i = 1; i < jsonData.length; i++) {
+        const row = jsonData[i];
+        if (!row || row.length < 2) continue;
+        // 第2列=标题(索引1)，第3列=正文(索引2)
+        const title = String(row[1] || '').trim();
+        const content = String(row[2] || '').trim();
+        if (title && content) {
+          pendingRows.push({ title, content, rowNum: i + 1 });
+        }
+      }
+
+      document.getElementById('importResult').innerHTML =
+        `<span class="ok">✅ 解析成功，共 ${pendingRows.length} 条有效数据</span>`;
+    } catch (err) {
+      document.getElementById('importResult').innerHTML =
+        `<span class="fail">❌ 解析失败: ${escHtml(err.message)}</span>`;
+      pendingRows = [];
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+async function doBatchImport() {
+  if (!pendingRows.length) {
+    alert('没有可导入的数据，请先选择 Excel 文件');
+    return;
+  }
+  if (!token) {
+    alert('请先登录管理后台');
+    return;
+  }
+
+  const btn = document.getElementById('btnImport');
+  btn.disabled = true;
+  btn.textContent = '⏳ 导入中...';
+
+  const progressWrap = document.getElementById('importProgress');
+  const progressBar = document.getElementById('progressBar');
+  const progressText = document.getElementById('progressText');
+  const resultEl = document.getElementById('importResult');
+  progressWrap.style.display = 'block';
+
+  let successCount = 0;
+  let failCount = 0;
+  const failDetails = [];
+
+  for (let i = 0; i < pendingRows.length; i++) {
+    const { title, content, rowNum } = pendingRows[i];
+    const pct = Math.round(((i + 1) / pendingRows.length) * 100);
+    progressBar.style.width = pct + '%';
+    progressText.textContent = `正在导入 ${i + 1}/${pendingRows.length} ...`;
+
+    try {
+      const res = await fetch('/zhongcao/api/items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Token': token },
+        body: JSON.stringify({ title, content })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        successCount++;
+      } else {
+        failCount++;
+        failDetails.push(`第${rowNum}行: ${escHtml(data.error || '未知错误')}`);
+      }
+    } catch (e) {
+      failCount++;
+      failDetails.push(`第${rowNum}行: 网络错误`);
+    }
+
+    // 每导入一条休息 100ms，避免请求过快
+    if (i < pendingRows.length - 1) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+
+  progressBar.style.width = '100%';
+  progressText.textContent = `导入完成！成功 ${successCount} 条，失败 ${failCount} 条`;
+
+  let html = `<span class="ok">✅ 成功 ${successCount} 条</span>`;
+  if (failCount > 0) {
+    html += `　<span class="fail">❌ 失败 ${failCount} 条</span><br><br>失败明细：<br>` +
+      failDetails.map(d => `<span class="fail">• ${d}</span>`).join('<br>');
+  }
+  resultEl.innerHTML = html;
+
+  btn.disabled = false;
+  btn.textContent = '📥 开始导入';
+  pendingRows = [];
+
+  // 刷新列表
+  loadItems();
 }
 
 function escHtml(s) {
