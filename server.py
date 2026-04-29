@@ -28,7 +28,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 # ========== 配置 ==========
 PORT = int(os.environ.get("PORT", "8899"))
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "congshaoyu102@")
 DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "items.json")
 MAX_BODY_SIZE = 1024 * 1024  # 1MB
 # ==========================
