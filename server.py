@@ -17,8 +17,14 @@ import uuid
 import hashlib
 import threading
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from http.server import HTTPServer
 from urllib.parse import urlparse, parse_qs
+
+# Threaded HTTP server to handle concurrent requests
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 # ========== 配置 ==========
 PORT = int(os.environ.get("PORT", "8899"))
@@ -1306,8 +1312,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"✅ 服务已启动")
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"✅ 服务已启动 (ThreadingHTTPServer)")
     print(f"   前端展示: http://localhost:{PORT}/")
     print(f"   管理后台: http://localhost:{PORT}/admin")
     print(f"   管理密码: {ADMIN_PASSWORD}")
